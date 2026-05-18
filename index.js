@@ -20,12 +20,12 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
 if (!TOKEN) {
-  console.error('❌ DISCORD_TOKEN missing in .env');
+  console.log('❌ DISCORD_TOKEN missing');
   process.exit(1);
 }
 
 if (!CLIENT_ID) {
-  console.error('❌ CLIENT_ID missing in .env');
+  console.log('❌ CLIENT_ID missing');
   process.exit(1);
 }
 
@@ -39,26 +39,26 @@ const fetchFn =
     : (...args) =>
         import('node-fetch').then(({ default: fetch }) => fetch(...args));
 
-const JARTEX_API = 'https://stats.jartexnetwork.com/api';
+const API = 'https://stats.jartexnetwork.com/api';
 
 // =====================================================
-// EXPRESS WEB SERVER
+// WEB SERVER
 // =====================================================
 
 const app = express();
 
 app.get('/', (req, res) => {
-  res.send('Jartex Stats Ultra Online');
+  res.send('Jartex Stats Ultra Running');
 });
 
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log(`🌍 Web server running on port ${PORT}`);
+  console.log(`🌍 Web server running on ${PORT}`);
 });
 
 // =====================================================
-// DISCORD CLIENT
+// DISCORD
 // =====================================================
 
 const client = new Client({
@@ -70,14 +70,15 @@ const client = new Client({
 // =====================================================
 
 const commands = [
+
   {
     name: 'ping',
-    description: 'Check bot latency'
+    description: 'Check latency'
   },
 
   {
     name: 'stats',
-    description: 'Get player Bedwars stats',
+    description: 'Get player stats',
     options: [
       {
         name: 'username',
@@ -90,24 +91,11 @@ const commands = [
 
   {
     name: 'clan',
-    description: 'Get clan information',
+    description: 'Get clan info',
     options: [
       {
         name: 'name',
-        description: 'Exact clan name',
-        type: ApplicationCommandOptionType.String,
-        required: true
-      }
-    ]
-  },
-
-  {
-    name: 'recent',
-    description: 'View most recent game',
-    options: [
-      {
-        name: 'username',
-        description: 'Minecraft username',
+        description: 'Clan name',
         type: ApplicationCommandOptionType.String,
         required: true
       }
@@ -116,7 +104,7 @@ const commands = [
 
   {
     name: 'clanlb',
-    description: 'Top scraped clans'
+    description: 'Top clans'
   }
 ];
 
@@ -124,61 +112,52 @@ const commands = [
 // HELPERS
 // =====================================================
 
-async function fetchJson(endpoint, retries = 3) {
+async function fetchJson(endpoint) {
 
-  const url = `${JARTEX_API}${endpoint}`;
+  try {
 
-  for (let i = 1; i <= retries; i++) {
-
-    try {
-
-      const res = await fetchFn(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0'
-        }
-      });
-
-      if (!res.ok) {
-
-        console.log(`❌ API returned ${res.status} for ${endpoint}`);
-
-        if (i === retries) return null;
-
-        continue;
+    const res = await fetchFn(`${API}${endpoint}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0'
       }
+    });
 
-      return await res.json();
-
-    } catch (err) {
-
-      console.error(`❌ Fetch failed (${i}/${retries})`, err);
-
-      if (i === retries) return null;
+    if (!res.ok) {
+      console.log(`❌ ${endpoint} => ${res.status}`);
+      return null;
     }
+
+    return await res.json();
+
+  } catch (err) {
+
+    console.log(`❌ Fetch failed for ${endpoint}`);
+    console.log(err);
+
+    return null;
   }
-
-  return null;
-}
-
-function toNum(v) {
-
-  const n = Number(v);
-
-  return Number.isFinite(n) ? n : 0;
-}
-
-function formatNum(v) {
-
-  return toNum(v).toLocaleString('en-IN');
 }
 
 function safeText(v, fallback = 'Unknown') {
 
-  if (v === undefined || v === null || v === '') {
+  if (
+    v === undefined ||
+    v === null ||
+    v === ''
+  ) {
     return fallback;
   }
 
   return String(v);
+}
+
+function num(v) {
+
+  const n = Number(v);
+
+  return Number.isFinite(n)
+    ? n.toLocaleString('en-IN')
+    : '0';
 }
 
 function extractArray(data) {
@@ -194,73 +173,66 @@ function extractArray(data) {
   return [];
 }
 
-function clampText(text, max) {
-
-  text = String(text || '');
-
-  if (text.length <= max) return text;
-
-  return text.slice(0, max - 3) + '...';
-}
-
 function getMemberName(m) {
 
   if (typeof m === 'string') return m;
 
-  if (!m || typeof m !== 'object') return 'Unknown';
-
   return (
-    m.username ||
-    m.name ||
-    m.player?.username ||
-    m.user?.username ||
-    m.member?.username ||
-    m.nick ||
+    m?.username ||
+    m?.name ||
+    m?.player?.username ||
+    m?.user?.username ||
     'Unknown'
   );
 }
 
-function extractValue(source, keys) {
+// =====================================================
+// AGGRESSIVE STAT FINDER
+// =====================================================
 
-  if (!source) return 0;
+function findStat(data, possibleNames) {
 
-  if (Array.isArray(source)) {
+  if (!data) return 0;
 
-    for (const item of source) {
+  // object structure
+  for (const key of possibleNames) {
 
-      const id = item?.id || item?.name || item?.stat;
+    if (data[key] !== undefined) {
 
-      if (keys.includes(id)) {
+      const val = data[key];
 
-        return toNum(
-          item?.value ??
-          item?.amount ??
-          item?.count ??
+      if (typeof val === 'object') {
+        return Number(
+          val.value ||
+          val.amount ||
+          val.count ||
           0
         );
       }
-    }
 
-    return 0;
+      return Number(val || 0);
+    }
   }
 
-  for (const key of keys) {
+  // array structure
+  if (Array.isArray(data)) {
 
-    const v = source?.[key];
+    for (const item of data) {
 
-    if (v && typeof v === 'object') {
+      const id =
+        item?.id ||
+        item?.name ||
+        item?.stat;
 
-      return toNum(
-        v.value ??
-        v.amount ??
-        v.count ??
-        0
-      );
-    }
+      if (possibleNames.includes(id)) {
 
-    if (v !== undefined && v !== null) {
-
-      return toNum(v);
+        return Number(
+          item?.value ||
+          item?.amount ||
+          item?.count ||
+          0
+        );
+      }
     }
   }
 
@@ -275,25 +247,26 @@ async function registerCommands() {
 
   try {
 
-    const rest = new REST({ version: '10' }).setToken(TOKEN);
+    const rest = new REST({
+      version: '10'
+    }).setToken(TOKEN);
 
-    const route = GUILD_ID
-      ? Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID)
-      : Routes.applicationCommands(CLIENT_ID);
-
-    await rest.put(route, {
-      body: commands
-    });
-
-    console.log(
-      GUILD_ID
-        ? '✅ Guild commands registered'
-        : '✅ Global commands registered'
+    await rest.put(
+      Routes.applicationGuildCommands(
+        CLIENT_ID,
+        GUILD_ID
+      ),
+      {
+        body: commands
+      }
     );
+
+    console.log('✅ Guild commands registered');
 
   } catch (err) {
 
-    console.error('❌ Command registration failed:', err);
+    console.log('❌ Command registration failed');
+    console.log(err);
   }
 }
 
@@ -309,7 +282,7 @@ client.once('ready', async () => {
 });
 
 // =====================================================
-// INTERACTIONS
+// COMMANDS
 // =====================================================
 
 client.on('interactionCreate', async interaction => {
@@ -349,23 +322,85 @@ client.on('interactionCreate', async interaction => {
 
       await interaction.deferReply();
 
+      // PROFILE
       const profile =
-        await fetchJson(`/profile/${encodeURIComponent(username)}`);
+        await fetchJson(`/profile/${username}`);
 
       if (!profile) {
 
         return interaction.editReply(
-          `❌ Player \`${username}\` not found`
+          `❌ Player not found`
         );
       }
 
-      const bwStats =
-        await fetchJson(
-          `/profile/${encodeURIComponent(username)}/leaderboard?type=bedwars&interval=total&mode=ALL_MODES`
-        );
+      // TRY MULTIPLE ENDPOINTS
+      let stats = null;
 
-      const stats =
-        bwStats?.data || bwStats || {};
+      const endpoints = [
+
+        `/profile/${username}/leaderboard?type=bedwars`,
+
+        `/profile/${username}/leaderboard?type=bedwars&interval=total`,
+
+        `/profile/${username}/leaderboard?type=bedwars&interval=total&mode=ALL_MODES`,
+
+        `/profile/${username}/leaderboard?type=bedwars&mode=ALL_MODES`
+      ];
+
+      for (const ep of endpoints) {
+
+        const res = await fetchJson(ep);
+
+        if (res) {
+          stats = res;
+          console.log(`✅ Working endpoint: ${ep}`);
+          break;
+        }
+      }
+
+      console.log('===== RAW STATS =====');
+      console.log(JSON.stringify(stats, null, 2));
+
+      const data =
+        stats?.data ||
+        stats ||
+        {};
+
+      // MASSIVE KEY FALLBACKS
+      const kills = findStat(data, [
+        'kills',
+        'Kills',
+        'kill'
+      ]);
+
+      const wins = findStat(data, [
+        'wins',
+        'Wins',
+        'win'
+      ]);
+
+      const beds = findStat(data, [
+        'beds_destroyed',
+        'Beds destroyed',
+        'beds'
+      ]);
+
+      const deaths = findStat(data, [
+        'deaths',
+        'Deaths'
+      ]);
+
+      const games = findStat(data, [
+        'played',
+        'Games played',
+        'games_played'
+      ]);
+
+      const finals = findStat(data, [
+        'final_kills',
+        'Final kills',
+        'finalkills'
+      ]);
 
       const embed = new EmbedBuilder()
 
@@ -376,74 +411,73 @@ client.on('interactionCreate', async interaction => {
         )
 
         .setThumbnail(
-          `https://mc-heads.net/avatar/${encodeURIComponent(username)}`
+          `https://mc-heads.net/avatar/${username}`
         )
 
         .addFields(
 
           {
             name: '🎖 Rank',
-            value: safeText(profile.rank?.name, 'Default'),
+            value: safeText(
+              profile.rank?.name ||
+              profile.rank?.display,
+              'Default'
+            ),
             inline: true
           },
 
           {
             name: '⭐ Level',
-            value: formatNum(profile.level || 0),
+            value: num(
+              profile.rank?.level ||
+              profile.level ||
+              0
+            ),
             inline: true
           },
 
           {
             name: '🛡 Clan',
-            value: safeText(profile.clan?.name, 'None'),
+            value: safeText(
+              profile.clan?.name,
+              'None'
+            ),
             inline: true
           },
 
           {
             name: '⚔ Kills',
-            value: formatNum(
-              extractValue(stats, ['kills'])
-            ),
+            value: num(kills),
             inline: true
           },
 
           {
             name: '🏆 Wins',
-            value: formatNum(
-              extractValue(stats, ['wins'])
-            ),
+            value: num(wins),
             inline: true
           },
 
           {
             name: '🛏 Beds',
-            value: formatNum(
-              extractValue(stats, ['beds_destroyed'])
-            ),
+            value: num(beds),
             inline: true
           },
 
           {
             name: '💀 Deaths',
-            value: formatNum(
-              extractValue(stats, ['deaths'])
-            ),
+            value: num(deaths),
             inline: true
           },
 
           {
             name: '🎮 Games',
-            value: formatNum(
-              extractValue(stats, ['played'])
-            ),
+            value: num(games),
             inline: true
           },
 
           {
             name: '💥 Final Kills',
-            value: formatNum(
-              extractValue(stats, ['final_kills'])
-            ),
+            value: num(finals),
             inline: true
           }
         )
@@ -471,37 +505,33 @@ client.on('interactionCreate', async interaction => {
       await interaction.deferReply();
 
       const clan =
-        await fetchJson(`/clans/${encodeURIComponent(clanName)}`);
+        await fetchJson(`/clans/${clanName}`);
 
       if (!clan) {
 
         return interaction.editReply(
-          `❌ Clan \`${clanName}\` not found`
+          `❌ Clan not found`
         );
       }
+
+      console.log('===== RAW CLAN =====');
+      console.log(JSON.stringify(clan, null, 2));
 
       const members =
         extractArray(clan.members);
 
-      const memberNames =
-        members
-          .map(getMemberName)
-          .filter(Boolean);
+      const names =
+        members.map(getMemberName);
 
-      let memberList =
-        memberNames.length
-          ? memberNames.join(', ')
-          : 'None';
-
-      memberList =
-        clampText(memberList, 1000);
+      const memberList =
+        names.join(', ').slice(0, 1000);
 
       const embed = new EmbedBuilder()
 
         .setColor('#ff0099')
 
         .setTitle(
-          `🛡 Clan Profile: ${safeText(clan.name, clanName)}`
+          `🛡 Clan Profile: ${clan.name}`
         )
 
         .addFields(
@@ -510,23 +540,27 @@ client.on('interactionCreate', async interaction => {
             name: '👑 Owner',
             value: safeText(
               clan.owner?.username ||
-              clan.leader?.username,
-              'Unknown'
+              clan.leader?.username
             ),
             inline: true
           },
 
           {
             name: '🏆 Trophies',
-            value: formatNum(clan.trophies || 0),
+            value: num(
+              clan.trophies ||
+              clan.stats?.trophies ||
+              0
+            ),
             inline: true
           },
 
           {
             name: '⭐ Level',
-            value: formatNum(
+            value: num(
               clan.level ||
               clan.tier ||
+              clan.stats?.level ||
               1
             ),
             inline: true
@@ -534,91 +568,18 @@ client.on('interactionCreate', async interaction => {
 
           {
             name: '✨ Clan EXP',
-            value: formatNum(
+            value: num(
               clan.exp ||
               clan.xp ||
+              clan.stats?.xp ||
               0
             ),
             inline: true
           },
 
           {
-            name: `👥 Members (${memberNames.length})`,
-            value: memberList
-          }
-        )
-
-        .setTimestamp();
-
-      return interaction.editReply({
-        embeds: [embed]
-      });
-    }
-
-    // =================================================
-    // RECENT
-    // =================================================
-
-    if (interaction.commandName === 'recent') {
-
-      const username =
-        interaction.options.getString('username');
-
-      await interaction.deferReply();
-
-      const profile =
-        await fetchJson(`/profile/${encodeURIComponent(username)}`);
-
-      if (!profile) {
-
-        return interaction.editReply(
-          `❌ Player \`${username}\` not found`
-        );
-      }
-
-      const recentGames =
-        extractArray(profile.recentGames) ||
-        extractArray(profile.matches);
-
-      if (!recentGames.length) {
-
-        return interaction.editReply(
-          `❌ No recent match data available for **${username}**`
-        );
-      }
-
-      const latest =
-        recentGames[0];
-
-      const embed = new EmbedBuilder()
-
-        .setColor('#ffaa00')
-
-        .setTitle(
-          `🕒 Recent Match for ${username}`
-        )
-
-        .addFields(
-
-          {
-            name: '🎮 Mode',
-            value: safeText(
-              latest.mode ||
-              latest.gameType
-            ),
-            inline: true
-          },
-
-          {
-            name: '🗺 Map',
-            value: safeText(latest.map),
-            inline: true
-          },
-
-          {
-            name: '⚔ Kills',
-            value: formatNum(latest.kills || 0),
-            inline: true
+            name: `👥 Members (${names.length})`,
+            value: memberList || 'None'
           }
         )
 
@@ -637,8 +598,19 @@ client.on('interactionCreate', async interaction => {
 
       await interaction.deferReply();
 
+      // fallback scraper
       const lb =
         await fetchJson('/leaderboard/bedwars/level');
+
+      if (!lb) {
+
+        return interaction.editReply(
+          '❌ Could not fetch leaderboard data'
+        );
+      }
+
+      console.log('===== RAW LB =====');
+      console.log(JSON.stringify(lb, null, 2));
 
       const players =
         extractArray(lb);
@@ -646,7 +618,7 @@ client.on('interactionCreate', async interaction => {
       if (!players.length) {
 
         return interaction.editReply(
-          '❌ Could not fetch leaderboard data'
+          '❌ No leaderboard entries found'
         );
       }
 
@@ -665,28 +637,26 @@ client.on('interactionCreate', async interaction => {
 
             name: clan.name,
 
-            trophies: toNum(
-              clan.trophies || 0
-            ),
+            trophies:
+              Number(clan.trophies || 0),
 
-            level: toNum(
-              clan.level || 1
-            )
+            level:
+              Number(clan.level || 1)
           });
         }
       }
 
-      const top5 =
+      const top =
         Array.from(clanMap.values())
           .sort((a, b) =>
             b.trophies - a.trophies
           )
           .slice(0, 5);
 
-      if (!top5.length) {
+      if (!top.length) {
 
         return interaction.editReply(
-          '❌ No clans found'
+          '❌ Could not scrape clan data'
         );
       }
 
@@ -694,8 +664,8 @@ client.on('interactionCreate', async interaction => {
         ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
 
       const desc =
-        top5.map((c, i) =>
-          `**${medals[i]} \`${c.name}\`**\n↳ 🏆 ${formatNum(c.trophies)} Trophies | ⭐ Level ${c.level}`
+        top.map((c, i) =>
+          `**${medals[i]} \`${c.name}\`**\n🏆 ${num(c.trophies)} | ⭐ ${num(c.level)}`
         ).join('\n\n');
 
       const embed = new EmbedBuilder()
@@ -703,7 +673,7 @@ client.on('interactionCreate', async interaction => {
         .setColor('#ffd700')
 
         .setTitle(
-          '🏆 Top 5 Scraped Clans'
+          '🏆 Top Clans'
         )
 
         .setDescription(desc)
@@ -717,27 +687,22 @@ client.on('interactionCreate', async interaction => {
 
   } catch (err) {
 
-    console.error(
-      `❌ Error in ${interaction.commandName}:`,
-      err
-    );
-
-    const msg =
-      '⚠️ Internal bot error';
+    console.log(err);
 
     if (
       interaction.deferred ||
       interaction.replied
     ) {
 
-      return interaction.editReply(msg)
-        .catch(() => {});
+      return interaction.editReply(
+        '⚠ Internal bot error'
+      );
     }
 
     return interaction.reply({
-      content: msg,
+      content: '⚠ Internal bot error',
       ephemeral: true
-    }).catch(() => {});
+    });
   }
 });
 
@@ -745,12 +710,12 @@ client.on('interactionCreate', async interaction => {
 // ANTI CRASH
 // =====================================================
 
-process.on('unhandledRejection', reason => {
-  console.error('🚫 Unhandled Rejection:', reason);
+process.on('unhandledRejection', err => {
+  console.log(err);
 });
 
 process.on('uncaughtException', err => {
-  console.error('🚫 Uncaught Exception:', err);
+  console.log(err);
 });
 
 // =====================================================
