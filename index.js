@@ -46,20 +46,26 @@ const commands = [
 client.once('ready', async () => {
   console.log(`Victory! Logged in as ${client.user.tag}`);
 
-  // Register the slash commands using your secure token variable
   const rest = new REST({ version: '10' }).setToken(mySecretToken);
   
   try {
     console.log('Registering your slash commands with Discord...');
     
+    // 1. This sets your new global commands (like /ping)
     await rest.put(
       Routes.applicationCommands(client.user.id),
       { body: commands }
     );
 
-    console.log('Slash commands registered successfully!');
+    // 2. THIS IS THE NUKE: It deletes all old Replit ghost commands from your server!
+    await rest.put(
+      Routes.applicationGuildCommands(client.user.id, '1504830943343677650'),
+      { body: [] }
+    );
+
+    console.log('Slash commands registered, and ghost commands nuked!');
   } catch (error) {
-    console.error('Failed to register commands:', error);
+    console.error('Failed to register/delete commands:', error);
   }
 });
 
