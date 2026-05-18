@@ -2,266 +2,248 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, REST, Routes, EmbedBuilder, ApplicationCommandOptionType } = require('discord.js');
 const express = require('express');
 
-const mySecretToken = process.env.DISCORD_TOKEN;
+const TOKEN = process.env.DISCORD_TOKEN;
+if (!TOKEN) {
+    console.error("❌ DISCORD_TOKEN missing in environment variables.");
+    process.exit(1);
+}
 
 // =====================================================================
-// WEB SERVER
+// 1. HELPER FUNCTIONS (API Retries & Safe Data)
+// =====================================================================
+const JARTEX_API = 'https://stats.jartexnetwork.com/api';
+
+async function fetchWithRetry(endpoint, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            const response = await fetch(`${JARTEX_API}${endpoint}`);
+            if (!response.ok) return null;
+            return await response.json();
+        } catch (error) {
+            console.error(`API Error on ${endpoint} (Attempt ${i + 1}):`, error);
+            if (i === retries - 1) return null;
+        }
+    }
+}
+
+function safeStat(data, key) {
+    if (!data) return "0";
+    if (Array.isArray(data)) {
+        const found = data.find(x => x.name === key || x.id === key || x.stat === key);
+        return found ? Number(found.value || found.amount || 0).toLocaleString() : "0";
+    }
+    const val = data[key]?.value || data[key] || 0;
+    return Number(val).toLocaleString();
+}
+
+// =====================================================================
+// 2. WEB SERVER (For Render 24/7 Hosting)
 // =====================================================================
 const app = express();
-const port = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Jartex Stats Bot is alive and scraping APIs!'));
-app.listen(port, () => console.log(`Web server listening on port ${port}`));
+app.get('/', (req, res) => res.send('Jartex Stats Bot is Online & Scraping!'));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🌍 Web server running on port ${PORT}`));
 
 // =====================================================================
-// BOT SETUP & COMMANDS
+// 3. COMMAND DEFINITIONS
+// =====================================================================
+const commands = [
+    {
+        name: 'ping',
+        description: 'Check bot latency and API status'
+    },
+    {
+        name: 'stats',
+        description: 'Get player Bedwars stats',
+        options: [{ name: 'username', description: 'Minecraft username', type: ApplicationCommandOptionType.String, required: true }]
+    },
+    {
+        name: 'clan',
+        description: 'Get clan information',
+        options: [{ name: 'name', description: 'Exact clan name', type: ApplicationCommandOptionType.String, required: true }]
+    },
+    {
+        name: 'recent',
+        description: 'View the most recent game of a player',
+        options: [{ name: 'username', description: 'Minecraft username', type: ApplicationCommandOptionType.String, required: true }]
+    },
+    {
+        name: 'clanlb',
+        description: 'Top 5 Clans this season (Scraped via Player Leaderboards)'
+    }
+];
+
+// =====================================================================
+// 4. BOT SETUP & EVENTS
 // =====================================================================
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-const commands = [
-  { name: 'ping', description: 'Replies with a ping!' },
-  {
-    name: 'stats',
-    description: 'Get the overall stats of a specific player',
-    options: [{ name: 'username', description: 'Minecraft username', type: ApplicationCommandOptionType.String, required: true }]
-  },
-  {
-    name: 'clan',
-    description: 'Get clan stats, trophies, members, and leader info',
-    options: [{ name: 'clanname', description: 'Exact clan name', type: ApplicationCommandOptionType.String, required: true }]
-  },
-  {
-    name: 'recent',
-    description: 'View the most recent game of a player',
-    options: [{ name: 'username', description: 'Minecraft username', type: ApplicationCommandOptionType.String, required: true }]
-  },
-  {
-    name: 'clanlb',
-    description: 'Top 5 Clans this season (Scraped via Player Leaderboards)',
-  }
-];
-
 client.once('ready', async () => {
-  console.log(`Victory! Logged in as ${client.user.tag}`);
-  const rest = new REST({ version: '10' }).setToken(mySecretToken);
-  try {
-    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    console.log('Slash commands registered successfully!');
-  } catch (error) {
-    console.error('Failed to register commands:', error);
-  }
+    console.log(`✅ Logged in safely as ${client.user.tag}`);
+    const rest = new REST({ version: '10' }).setToken(TOKEN);
+    try {
+        console.log('Registering slash commands...');
+        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+        console.log('✅ Slash commands registered successfully!');
+    } catch (error) {
+        console.error('Failed to register commands:', error);
+    }
 });
 
-// =====================================================================
-// API COMMAND LOGIC
-// =====================================================================
-client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  if (interaction.commandName === 'ping') {
-    await interaction.reply('Pong! API scrapers are fully online.');
-  }
-
-  // --- /STATS ---
-  else if (interaction.commandName === 'stats') {
-    const player = interaction.options.getString('username');
-    await interaction.deferReply(); 
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isChatInputCommand()) return;
 
     try {
-      const profileRes = await fetch(`https://stats.jartexnetwork.com/api/profile/${player}`);
-      if (!profileRes.ok) return await interaction.editReply(`❌ Could not find player **${player}** on JartexNetwork.`);
-      const profileData = await profileRes.json();
-
-      // Fetch Bedwars Stats
-      const statsRes = await fetch(`https://stats.jartexnetwork.com/api/profile/${player}/leaderboard?type=bedwars&interval=total&mode=ALL_MODES`);
-      const statsData = statsRes.ok ? await statsRes.json() : {};
-
-      const rank = profileData.rank?.name || 'Default';
-      const level = profileData.level || 0;
-      const clanName = profileData.clan?.name || 'None';
-      
-      // AGGRESSIVE STAT FINDER (Fixes the "0" issue)
-      // Checks if Jartex returned an array, an object, or nested entries.
-      const getStat = (statName) => {
-        let value = 0;
-        if (Array.isArray(statsData)) {
-            const found = statsData.find(s => s.id === statName || s.stat === statName || s.name === statName);
-            if (found) value = found.value || found.amount || 0;
-        } else if (statsData[statName]) {
-            value = statsData[statName].value || statsData[statName] || 0;
-        } else if (statsData.entries && statsData.entries[statName]) {
-            value = statsData.entries[statName];
+        // --- PING ---
+        if (interaction.commandName === 'ping') {
+            const sent = await interaction.reply({ content: 'Pinging...', fetchReply: true });
+            const latency = sent.createdTimestamp - interaction.createdTimestamp;
+            await interaction.editReply(`🏓 Pong! Bot Latency: \`${latency}ms\` | API Latency: \`${interaction.client.ws.ping}ms\``);
         }
-        // Format with commas (e.g., 1,000)
-        return value.toLocaleString();
-      };
 
-      const statsEmbed = new EmbedBuilder()
-        .setTitle(`📊 Jartex Stats: ${profileData.username || player}`)
-        .setColor('#00FF00')
-        .setThumbnail(`https://minotar.net/helm/${player}/100.png`)
-        .addFields(
-          { name: '🎖️ Rank', value: `${rank}`, inline: true },
-          { name: '⭐ Level', value: `${level}`, inline: true },
-          { name: '🛡️ Clan', value: `${clanName}`, inline: true },
-          { name: '⚔️ Kills', value: getStat('kills'), inline: true },
-          { name: '💀 Final Kills', value: getStat('final_kills'), inline: true },
-          { name: '☠️ Deaths', value: getStat('deaths'), inline: true },
-          { name: '🛏️ Beds Destroyed', value: getStat('beds_destroyed'), inline: true },
-          { name: '🏆 Wins', value: getStat('wins'), inline: true },
-          { name: '🎮 Games Played', value: getStat('played'), inline: true }
-        )
-        .setFooter({ text: 'Live API Data • JartexNetwork' })
-        .setTimestamp();
+        // --- STATS ---
+        else if (interaction.commandName === 'stats') {
+            const username = interaction.options.getString('username');
+            await interaction.deferReply();
 
-      await interaction.editReply({ embeds: [statsEmbed] });
-    } catch (error) {
-      console.error(error);
-      await interaction.editReply('⚠️ Error connecting to the Jartex API. They might be rate-limiting the bot.');
-    }
-  }
+            const profile = await fetchWithRetry(`/profile/${username}`);
+            if (!profile) return interaction.editReply(`❌ Player \`${username}\` not found.`);
 
-  // --- /CLAN ---
-  else if (interaction.commandName === 'clan') {
-    const clanInput = interaction.options.getString('clanname');
-    await interaction.deferReply();
+            const bwStats = await fetchWithRetry(`/profile/${username}/leaderboard?type=bedwars&interval=total&mode=ALL_MODES`);
 
-    try {
-      const clanRes = await fetch(`https://stats.jartexnetwork.com/api/clans/${clanInput}`);
-      if (!clanRes.ok) return await interaction.editReply(`❌ Could not find clan **${clanInput}**.`);
-      const clanData = await clanRes.json();
+            const embed = new EmbedBuilder()
+                .setColor('#00ff99')
+                .setTitle(`📊 Stats for ${profile.username || username}`)
+                .setThumbnail(`https://mc-heads.net/avatar/${username}`)
+                .addFields(
+                    { name: '🎖 Rank', value: profile.rank?.name || 'Default', inline: true },
+                    { name: '⭐ Level', value: String(profile.level || 0), inline: true },
+                    { name: '🛡 Clan', value: profile.clan?.name || 'None', inline: true },
+                    { name: '⚔ Kills', value: safeStat(bwStats, 'kills'), inline: true },
+                    { name: '🏆 Wins', value: safeStat(bwStats, 'wins'), inline: true },
+                    { name: '🛏 Beds Destroyed', value: safeStat(bwStats, 'beds_destroyed'), inline: true }
+                )
+                .setFooter({ text: 'JartexNetwork Stats' })
+                .setTimestamp();
 
-      // Extract precise clan stats
-      const leader = clanData.owner?.username || clanData.leader?.username || 'Unknown';
-      const level = clanData.level || clanData.tier || 1;
-      const exp = (clanData.exp || clanData.xp || 0).toLocaleString();
-      const trophies = (clanData.trophies || 0).toLocaleString();
-      
-      // Parse members safely and limit to 50 so it doesn't crash Discord embeds
-      let memberList = 'None';
-      if (clanData.members && Array.isArray(clanData.members)) {
-          const names = clanData.members.map(m => m.username || m.name || m);
-          // If there are too many members, cut it off and add "..."
-          memberList = names.length > 50 ? names.slice(0, 50).join(', ') + '...' : names.join(', ');
-      }
+            await interaction.editReply({ embeds: [embed] });
+        }
 
-      const clanEmbed = new EmbedBuilder()
-        .setTitle(`🛡️ Clan Profile: ${clanData.name || clanInput}`)
-        .setColor('#FF00AA')
-        .addFields(
-          { name: '👑 Leader', value: `${leader}`, inline: true },
-          { name: '⭐ Level', value: `${level}`, inline: true },
-          { name: '🏆 Trophies', value: `${trophies}`, inline: true },
-          { name: '✨ Clan EXP', value: `${exp}`, inline: true },
-          { name: '👥 Member Count', value: `${clanData.members?.length || 0}`, inline: true },
-          { name: '📜 Members Roster', value: `\`\`\`\n${memberList}\n\`\`\``, inline: false } // Creates a nice code block for members
-        )
-        .setTimestamp();
+        // --- CLAN ---
+        else if (interaction.commandName === 'clan') {
+            const clanName = interaction.options.getString('name');
+            await interaction.deferReply();
 
-      await interaction.editReply({ embeds: [clanEmbed] });
-    } catch (error) {
-      console.error(error);
-      await interaction.editReply('⚠️ Error fetching clan data.');
-    }
-  }
+            const clan = await fetchWithRetry(`/clans/${clanName}`);
+            if (!clan) return interaction.editReply(`❌ Clan \`${clanName}\` not found.`);
 
-  // --- /RECENT ---
-  else if (interaction.commandName === 'recent') {
-    const player = interaction.options.getString('username');
-    await interaction.deferReply();
+            let membersList = clan.members?.map(m => m.username || m).join(', ') || 'None';
+            if (membersList.length > 1000) {
+                membersList = membersList.substring(0, 1000) + '... (Too many to display)';
+            }
 
-    try {
-      const profileRes = await fetch(`https://stats.jartexnetwork.com/api/profile/${player}`);
-      if (!profileRes.ok) return await interaction.editReply(`❌ Could not find player **${player}**.`);
-      const profileData = await profileRes.json();
+            const embed = new EmbedBuilder()
+                .setColor('#ff0099')
+                .setTitle(`🛡 Clan Profile: ${clan.name}`)
+                .addFields(
+                    { name: '👑 Owner', value: clan.owner?.username || 'Unknown', inline: true },
+                    { name: '🏆 Trophies', value: Number(clan.trophies || 0).toLocaleString(), inline: true },
+                    { name: '⭐ Level', value: String(clan.level || 1), inline: true },
+                    { name: '✨ Clan EXP', value: Number(clan.exp || clan.xp || 0).toLocaleString(), inline: true },
+                    { name: `👥 Members (${clan.members?.length || 0})`, value: membersList }
+                )
+                .setTimestamp();
 
-      // Attempt to find recent games in the profile payload
-      const recentGames = profileData.recentGames || profileData.matches || [];
-      
-      if (recentGames.length === 0) {
-          return await interaction.editReply(`❌ No recent match data available for **${player}** right now.`);
-      }
+            await interaction.editReply({ embeds: [embed] });
+        }
 
-      const latestMatch = recentGames[0]; // Get the very first one
+        // --- RECENT ---
+        else if (interaction.commandName === 'recent') {
+            const username = interaction.options.getString('username');
+            await interaction.deferReply();
 
-      const recentEmbed = new EmbedBuilder()
-        .setTitle(`🕒 Most Recent Game for ${player}`)
-        .setColor('#FFA500')
-        .addFields(
-          { name: '🎮 Mode', value: `${latestMatch.mode || latestMatch.gameType || 'Unknown'}`, inline: true },
-          { name: '🗺️ Map', value: `${latestMatch.map || 'Unknown'}`, inline: true },
-          { name: '⚔️ Kills', value: `${latestMatch.kills || 0}`, inline: true }
-        )
-        .setFooter({ text: 'JartexNetwork Match History' })
-        .setTimestamp();
+            const profile = await fetchWithRetry(`/profile/${username}`);
+            if (!profile) return interaction.editReply(`❌ Player \`${username}\` not found.`);
 
-      await interaction.editReply({ embeds: [recentEmbed] });
-    } catch (error) {
-      console.error(error);
-      await interaction.editReply('⚠️ Error fetching recent match data.');
-    }
-  }
+            const recentGames = profile.recentGames || profile.matches || [];
+            if (recentGames.length === 0) {
+                return interaction.editReply(`❌ No recent match data available for **${username}** right now. Jartex hides this for most players.`);
+            }
 
-  // --- /CLANLB (THE REVERSE-ENGINEERED SCRAPER) ---
-  else if (interaction.commandName === 'clanlb') {
-    await interaction.deferReply();
+            const latestMatch = recentGames[0];
+            const embed = new EmbedBuilder()
+                .setColor('#FFA500')
+                .setTitle(`🕒 Most Recent Game for ${username}`)
+                .addFields(
+                    { name: '🎮 Mode', value: String(latestMatch.mode || latestMatch.gameType || 'Unknown'), inline: true },
+                    { name: '🗺️ Map', value: String(latestMatch.map || 'Unknown'), inline: true },
+                    { name: '⚔️ Kills', value: String(latestMatch.kills || 0), inline: true }
+                )
+                .setTimestamp();
 
-    try {
-      // 1. Fetch the top bedwars players
-      const lbRes = await fetch('https://stats.jartexnetwork.com/api/leaderboard/bedwars/level');
-      if (!lbRes.ok) return await interaction.editReply('❌ Could not fetch player leaderboards to build clan data.');
-      
-      const lbData = await lbRes.json();
-      const players = lbData.data || lbData || [];
-      
-      // 2. Extract clans from those top players
-      const clanMap = new Map();
-      
-      for (const player of players) {
-          if (player.clan && player.clan.name) {
-              const clanName = player.clan.name;
-              // If we haven't tracked this clan yet, add it
-              if (!clanMap.has(clanName)) {
-                  clanMap.set(clanName, {
-                      name: clanName,
-                      trophies: player.clan.trophies || 0,
-                      level: player.clan.level || 1
-                  });
-              }
-          }
-      }
+            await interaction.editReply({ embeds: [embed] });
+        }
 
-      // 3. Convert Map to Array and Sort by Trophies (Highest to Lowest)
-      const sortedClans = Array.from(clanMap.values()).sort((a, b) => b.trophies - a.trophies);
-      const top5 = sortedClans.slice(0, 5); // Take top 5
+        // --- CLANLB ---
+        else if (interaction.commandName === 'clanlb') {
+            await interaction.deferReply();
 
-      if (top5.length === 0) {
-          return await interaction.editReply('❌ Could not scrape any clan data from the current leaderboards.');
-      }
+            const lbData = await fetchWithRetry('/leaderboard/bedwars/level');
+            if (!lbData) return interaction.editReply('❌ Could not fetch leaderboards.');
+            
+            const players = lbData.data || lbData || [];
+            const clanMap = new Map();
+            
+            for (const player of players) {
+                if (player.clan && player.clan.name) {
+                    const cName = player.clan.name;
+                    if (!clanMap.has(cName)) {
+                        clanMap.set(cName, {
+                            name: cName,
+                            trophies: player.clan.trophies || 0,
+                            level: player.clan.level || 1
+                        });
+                    }
+                }
+            }
 
-      // 4. Build the dynamic leaderboard string
-      let description = '';
-      const medals = ['🥇', '🥈', '🥉', '🏅', '🏅'];
-      
-      top5.forEach((clan, index) => {
-          description += `**${medals[index]} \`${clan.name}\`**\n`;
-          description += `↳ 🏆 **${clan.trophies.toLocaleString()}** Trophies | ⭐ Level ${clan.level}\n\n`;
-      });
+            const top5 = Array.from(clanMap.values()).sort((a, b) => b.trophies - a.trophies).slice(0, 5);
+            if (top5.length === 0) return interaction.editReply('❌ Scraper found no clan data.');
 
-      const lbEmbed = new EmbedBuilder()
-        .setTitle(`🏆 Top 5 Scraped Clans (By Trophies)`)
-        .setColor('#FFD700') // Gold
-        .setDescription(description)
-        .setFooter({ text: `Compiled by analyzing top players • JartexNetwork` })
-        .setTimestamp();
+            let desc = '';
+            const medals = ['🥇', '🥈', '🥉', '🏅', '🏅'];
+            top5.forEach((clan, i) => {
+                desc += `**${medals[i]} \`${clan.name}\`**\n↳ 🏆 **${clan.trophies.toLocaleString()}** Trophies | ⭐ Level ${clan.level}\n\n`;
+            });
 
-      await interaction.editReply({ embeds: [lbEmbed] });
+            const embed = new EmbedBuilder()
+                .setColor('#FFD700')
+                .setTitle(`🏆 Top 5 Scraped Clans (By Trophies)`)
+                .setDescription(desc)
+                .setFooter({ text: 'Compiled by scraping top players' })
+                .setTimestamp();
+
+            await interaction.editReply({ embeds: [embed] });
+        }
 
     } catch (error) {
-      console.error(error);
-      await interaction.editReply('⚠️ Scraper failed. The API might have changed its leaderboard structure.');
+        console.error(`Error executing ${interaction.commandName}:`, error);
+        if (interaction.replied || interaction.deferred) {
+            await interaction.followUp({ content: '⚠️ Command crashed internally!', ephemeral: true });
+        } else {
+            await interaction.reply({ content: '⚠️ Command crashed internally!', ephemeral: true });
+        }
     }
-  }
-
 });
 
-client.login(mySecretToken);
+// =====================================================================
+// 5. ANTI-CRASH PROTECTION
+// =====================================================================
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('🚫 Unhandled Rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+    console.error('🚫 Uncaught Exception:', err);
+});
+
+client.login(TOKEN);
