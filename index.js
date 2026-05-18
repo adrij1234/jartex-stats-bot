@@ -19,18 +19,13 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
-if (!TOKEN) {
-  console.log('❌ DISCORD_TOKEN missing');
-  process.exit(1);
-}
-
-if (!CLIENT_ID) {
-  console.log('❌ CLIENT_ID missing');
+if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
+  console.log('❌ Missing env variables');
   process.exit(1);
 }
 
 // =====================================================
-// FETCH FIX
+// FETCH
 // =====================================================
 
 const fetchFn =
@@ -42,7 +37,7 @@ const fetchFn =
 const API = 'https://stats.jartexnetwork.com/api';
 
 // =====================================================
-// WEB SERVER
+// EXPRESS
 // =====================================================
 
 const app = express();
@@ -51,14 +46,10 @@ app.get('/', (req, res) => {
   res.send('Jartex Stats Ultra Running');
 });
 
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-  console.log(`🌍 Web server running on ${PORT}`);
-});
+app.listen(process.env.PORT || 3000);
 
 // =====================================================
-// DISCORD
+// CLIENT
 // =====================================================
 
 const client = new Client({
@@ -73,7 +64,7 @@ const commands = [
 
   {
     name: 'ping',
-    description: 'Check latency'
+    description: 'Ping the bot'
   },
 
   {
@@ -116,11 +107,20 @@ async function fetchJson(endpoint) {
 
   try {
 
+    const controller = new AbortController();
+
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, 10000);
+
     const res = await fetchFn(`${API}${endpoint}`, {
+      signal: controller.signal,
       headers: {
         'User-Agent': 'Mozilla/5.0'
       }
     });
+
+    clearTimeout(timeout);
 
     if (!res.ok) {
       console.log(`❌ ${endpoint} => ${res.status}`);
@@ -131,14 +131,14 @@ async function fetchJson(endpoint) {
 
   } catch (err) {
 
-    console.log(`❌ Fetch failed for ${endpoint}`);
+    console.log(`❌ Failed ${endpoint}`);
     console.log(err);
 
     return null;
   }
 }
 
-function safeText(v, fallback = 'Unknown') {
+function safe(v, fallback = 'Unknown') {
 
   if (
     v === undefined ||
@@ -168,8 +168,6 @@ function extractArray(data) {
 
   if (Array.isArray(data?.items)) return data.items;
 
-  if (Array.isArray(data?.results)) return data.results;
-
   return [];
 }
 
@@ -187,87 +185,26 @@ function getMemberName(m) {
 }
 
 // =====================================================
-// AGGRESSIVE STAT FINDER
-// =====================================================
-
-function findStat(data, possibleNames) {
-
-  if (!data) return 0;
-
-  // object structure
-  for (const key of possibleNames) {
-
-    if (data[key] !== undefined) {
-
-      const val = data[key];
-
-      if (typeof val === 'object') {
-        return Number(
-          val.value ||
-          val.amount ||
-          val.count ||
-          0
-        );
-      }
-
-      return Number(val || 0);
-    }
-  }
-
-  // array structure
-  if (Array.isArray(data)) {
-
-    for (const item of data) {
-
-      const id =
-        item?.id ||
-        item?.name ||
-        item?.stat;
-
-      if (possibleNames.includes(id)) {
-
-        return Number(
-          item?.value ||
-          item?.amount ||
-          item?.count ||
-          0
-        );
-      }
-    }
-  }
-
-  return 0;
-}
-
-// =====================================================
 // REGISTER COMMANDS
 // =====================================================
 
 async function registerCommands() {
 
-  try {
+  const rest = new REST({
+    version: '10'
+  }).setToken(TOKEN);
 
-    const rest = new REST({
-      version: '10'
-    }).setToken(TOKEN);
+  await rest.put(
+    Routes.applicationGuildCommands(
+      CLIENT_ID,
+      GUILD_ID
+    ),
+    {
+      body: commands
+    }
+  );
 
-    await rest.put(
-      Routes.applicationGuildCommands(
-        CLIENT_ID,
-        GUILD_ID
-      ),
-      {
-        body: commands
-      }
-    );
-
-    console.log('✅ Guild commands registered');
-
-  } catch (err) {
-
-    console.log('❌ Command registration failed');
-    console.log(err);
-  }
+  console.log('✅ Commands registered');
 }
 
 // =====================================================
@@ -282,7 +219,7 @@ client.once('ready', async () => {
 });
 
 // =====================================================
-// COMMANDS
+// COMMAND HANDLER
 // =====================================================
 
 client.on('interactionCreate', async interaction => {
@@ -322,85 +259,96 @@ client.on('interactionCreate', async interaction => {
 
       await interaction.deferReply();
 
-      // PROFILE
       const profile =
         await fetchJson(`/profile/${username}`);
 
       if (!profile) {
 
         return interaction.editReply(
-          `❌ Player not found`
+          '❌ Player not found'
         );
       }
 
-      // TRY MULTIPLE ENDPOINTS
-      let stats = null;
+      console.log('===== PROFILE =====');
+      console.log(JSON.stringify(profile, null, 2));
 
-      const endpoints = [
+      // leaderboard attempt
+      const lb =
+        await fetchJson(
+          `/profile/${username}/leaderboard?type=bedwars`
+        );
 
-        `/profile/${username}/leaderboard?type=bedwars`,
+      console.log('===== LB =====');
+      console.log(JSON.stringify(lb, null, 2));
 
-        `/profile/${username}/leaderboard?type=bedwars&interval=total`,
+      // stats hidden/failing
+      let kills = 'Hidden';
+      let wins = 'Hidden';
+      let beds = 'Hidden';
+      let deaths = 'Hidden';
+      let games = 'Hidden';
+      let finals = 'Hidden';
 
-        `/profile/${username}/leaderboard?type=bedwars&interval=total&mode=ALL_MODES`,
+      // try parsing if exists
+      const raw =
+        lb?.data ||
+        lb ||
+        [];
 
-        `/profile/${username}/leaderboard?type=bedwars&mode=ALL_MODES`
-      ];
+      if (Array.isArray(raw) && raw.length > 0) {
 
-      for (const ep of endpoints) {
+        for (const item of raw) {
 
-        const res = await fetchJson(ep);
+          const name =
+            item?.id ||
+            item?.name ||
+            item?.stat ||
+            '';
 
-        if (res) {
-          stats = res;
-          console.log(`✅ Working endpoint: ${ep}`);
-          break;
+          const value =
+            item?.value ||
+            item?.amount ||
+            item?.count ||
+            0;
+
+          if (
+            name.toLowerCase().includes('kill') &&
+            !name.toLowerCase().includes('final')
+          ) {
+            kills = num(value);
+          }
+
+          if (
+            name.toLowerCase().includes('win')
+          ) {
+            wins = num(value);
+          }
+
+          if (
+            name.toLowerCase().includes('bed')
+          ) {
+            beds = num(value);
+          }
+
+          if (
+            name.toLowerCase().includes('death')
+          ) {
+            deaths = num(value);
+          }
+
+          if (
+            name.toLowerCase().includes('play')
+          ) {
+            games = num(value);
+          }
+
+          if (
+            name.toLowerCase().includes('final')
+          ) {
+            finals = num(value);
+          }
         }
       }
-
-      console.log('===== RAW STATS =====');
-      console.log(JSON.stringify(stats, null, 2));
-
-      const data =
-        stats?.data ||
-        stats ||
-        {};
-
-      // MASSIVE KEY FALLBACKS
-      const kills = findStat(data, [
-        'kills',
-        'Kills',
-        'kill'
-      ]);
-
-      const wins = findStat(data, [
-        'wins',
-        'Wins',
-        'win'
-      ]);
-
-      const beds = findStat(data, [
-        'beds_destroyed',
-        'Beds destroyed',
-        'beds'
-      ]);
-
-      const deaths = findStat(data, [
-        'deaths',
-        'Deaths'
-      ]);
-
-      const games = findStat(data, [
-        'played',
-        'Games played',
-        'games_played'
-      ]);
-
-      const finals = findStat(data, [
-        'final_kills',
-        'Final kills',
-        'finalkills'
-      ]);
 
       const embed = new EmbedBuilder()
 
@@ -418,7 +366,7 @@ client.on('interactionCreate', async interaction => {
 
           {
             name: '🎖 Rank',
-            value: safeText(
+            value: safe(
               profile.rank?.name ||
               profile.rank?.display,
               'Default'
@@ -438,7 +386,7 @@ client.on('interactionCreate', async interaction => {
 
           {
             name: '🛡 Clan',
-            value: safeText(
+            value: safe(
               profile.clan?.name,
               'None'
             ),
@@ -447,37 +395,37 @@ client.on('interactionCreate', async interaction => {
 
           {
             name: '⚔ Kills',
-            value: num(kills),
+            value: kills,
             inline: true
           },
 
           {
             name: '🏆 Wins',
-            value: num(wins),
+            value: wins,
             inline: true
           },
 
           {
             name: '🛏 Beds',
-            value: num(beds),
+            value: beds,
             inline: true
           },
 
           {
             name: '💀 Deaths',
-            value: num(deaths),
+            value: deaths,
             inline: true
           },
 
           {
             name: '🎮 Games',
-            value: num(games),
+            value: games,
             inline: true
           },
 
           {
             name: '💥 Final Kills',
-            value: num(finals),
+            value: finals,
             inline: true
           }
         )
@@ -510,11 +458,11 @@ client.on('interactionCreate', async interaction => {
       if (!clan) {
 
         return interaction.editReply(
-          `❌ Clan not found`
+          '❌ Clan not found'
         );
       }
 
-      console.log('===== RAW CLAN =====');
+      console.log('===== CLAN =====');
       console.log(JSON.stringify(clan, null, 2));
 
       const members =
@@ -523,22 +471,19 @@ client.on('interactionCreate', async interaction => {
       const names =
         members.map(getMemberName);
 
-      const memberList =
-        names.join(', ').slice(0, 1000);
-
       const embed = new EmbedBuilder()
 
         .setColor('#ff0099')
 
         .setTitle(
-          `🛡 Clan Profile: ${clan.name}`
+          `🛡 Clan Profile: ${safe(clan.name)}`
         )
 
         .addFields(
 
           {
             name: '👑 Owner',
-            value: safeText(
+            value: safe(
               clan.owner?.username ||
               clan.leader?.username
             ),
@@ -579,7 +524,7 @@ client.on('interactionCreate', async interaction => {
 
           {
             name: `👥 Members (${names.length})`,
-            value: memberList || 'None'
+            value: names.join(', ').slice(0, 1000)
           }
         )
 
@@ -598,91 +543,10 @@ client.on('interactionCreate', async interaction => {
 
       await interaction.deferReply();
 
-      // fallback scraper
-      const lb =
-        await fetchJson('/leaderboard/bedwars/level');
-
-      if (!lb) {
-
-        return interaction.editReply(
-          '❌ Could not fetch leaderboard data'
-        );
-      }
-
-      console.log('===== RAW LB =====');
-      console.log(JSON.stringify(lb, null, 2));
-
-      const players =
-        extractArray(lb);
-
-      if (!players.length) {
-
-        return interaction.editReply(
-          '❌ No leaderboard entries found'
-        );
-      }
-
-      const clanMap = new Map();
-
-      for (const player of players) {
-
-        const clan =
-          player?.clan;
-
-        if (!clan?.name) continue;
-
-        if (!clanMap.has(clan.name)) {
-
-          clanMap.set(clan.name, {
-
-            name: clan.name,
-
-            trophies:
-              Number(clan.trophies || 0),
-
-            level:
-              Number(clan.level || 1)
-          });
-        }
-      }
-
-      const top =
-        Array.from(clanMap.values())
-          .sort((a, b) =>
-            b.trophies - a.trophies
-          )
-          .slice(0, 5);
-
-      if (!top.length) {
-
-        return interaction.editReply(
-          '❌ Could not scrape clan data'
-        );
-      }
-
-      const medals =
-        ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
-
-      const desc =
-        top.map((c, i) =>
-          `**${medals[i]} \`${c.name}\`**\n🏆 ${num(c.trophies)} | ⭐ ${num(c.level)}`
-        ).join('\n\n');
-
-      const embed = new EmbedBuilder()
-
-        .setColor('#ffd700')
-
-        .setTitle(
-          '🏆 Top Clans'
-        )
-
-        .setDescription(desc)
-
-        .setTimestamp();
-
-      return interaction.editReply({
-        embeds: [embed]
-      });
+      // TEMP DISABLED
+      return interaction.editReply(
+        '⚠️ Jartex leaderboard API is currently unstable/broken.'
+      );
     }
 
   } catch (err) {
@@ -707,7 +571,7 @@ client.on('interactionCreate', async interaction => {
 });
 
 // =====================================================
-// ANTI CRASH
+// CRASH PROTECTION
 // =====================================================
 
 process.on('unhandledRejection', err => {
