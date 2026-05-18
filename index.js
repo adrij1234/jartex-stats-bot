@@ -20,7 +20,7 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.log('❌ Missing env variables');
+  console.log('❌ Missing .env variables');
   process.exit(1);
 }
 
@@ -103,41 +103,6 @@ const commands = [
 // HELPERS
 // =====================================================
 
-async function fetchJson(endpoint) {
-
-  try {
-
-    const controller = new AbortController();
-
-    const timeout = setTimeout(() => {
-      controller.abort();
-    }, 10000);
-
-    const res = await fetchFn(`${API}${endpoint}`, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0'
-      }
-    });
-
-    clearTimeout(timeout);
-
-    if (!res.ok) {
-      console.log(`❌ ${endpoint} => ${res.status}`);
-      return null;
-    }
-
-    return await res.json();
-
-  } catch (err) {
-
-    console.log(`❌ Failed ${endpoint}`);
-    console.log(err);
-
-    return null;
-  }
-}
-
 function safe(v, fallback = 'Unknown') {
 
   if (
@@ -185,26 +150,76 @@ function getMemberName(m) {
 }
 
 // =====================================================
+// SAFE FETCH WITH RETRIES
+// =====================================================
+
+async function fetchJson(endpoint, retries = 3) {
+
+  for (let i = 0; i < retries; i++) {
+
+    try {
+
+      const controller = new AbortController();
+
+      const timeout = setTimeout(() => {
+        controller.abort();
+      }, 7000);
+
+      const res = await fetchFn(`${API}${endpoint}`, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0'
+        }
+      });
+
+      clearTimeout(timeout);
+
+      if (!res.ok) {
+
+        console.log(`❌ ${endpoint} => ${res.status}`);
+
+        continue;
+      }
+
+      return await res.json();
+
+    } catch (err) {
+
+      console.log(`❌ Retry ${i + 1} failed for ${endpoint}`);
+    }
+  }
+
+  return null;
+}
+
+// =====================================================
 // REGISTER COMMANDS
 // =====================================================
 
 async function registerCommands() {
 
-  const rest = new REST({
-    version: '10'
-  }).setToken(TOKEN);
+  try {
 
-  await rest.put(
-    Routes.applicationGuildCommands(
-      CLIENT_ID,
-      GUILD_ID
-    ),
-    {
-      body: commands
-    }
-  );
+    const rest = new REST({
+      version: '10'
+    }).setToken(TOKEN);
 
-  console.log('✅ Commands registered');
+    await rest.put(
+      Routes.applicationGuildCommands(
+        CLIENT_ID,
+        GUILD_ID
+      ),
+      {
+        body: commands
+      }
+    );
+
+    console.log('✅ Commands registered');
+
+  } catch (err) {
+
+    console.log(err);
+  }
 }
 
 // =====================================================
@@ -219,7 +234,7 @@ client.once('ready', async () => {
 });
 
 // =====================================================
-// COMMAND HANDLER
+// INTERACTIONS
 // =====================================================
 
 client.on('interactionCreate', async interaction => {
@@ -244,7 +259,7 @@ client.on('interactionCreate', async interaction => {
         interaction.createdTimestamp;
 
       return interaction.editReply(
-        `🏓 Pong!\nBot: \`${latency}ms\`\nAPI: \`${client.ws.ping}ms\``
+        `🏓 Pong!\nBot: \`${latency}ms\`\nGateway: \`${client.ws.ping}ms\``
       );
     }
 
@@ -265,90 +280,12 @@ client.on('interactionCreate', async interaction => {
       if (!profile) {
 
         return interaction.editReply(
-          '❌ Player not found'
+          '❌ Player not found or API failed'
         );
       }
 
       console.log('===== PROFILE =====');
       console.log(JSON.stringify(profile, null, 2));
-
-      // leaderboard attempt
-      const lb =
-        await fetchJson(
-          `/profile/${username}/leaderboard?type=bedwars`
-        );
-
-      console.log('===== LB =====');
-      console.log(JSON.stringify(lb, null, 2));
-
-      // stats hidden/failing
-      let kills = 'Hidden';
-      let wins = 'Hidden';
-      let beds = 'Hidden';
-      let deaths = 'Hidden';
-      let games = 'Hidden';
-      let finals = 'Hidden';
-
-      // try parsing if exists
-      const raw =
-        lb?.data ||
-        lb ||
-        [];
-
-      if (Array.isArray(raw) && raw.length > 0) {
-
-        for (const item of raw) {
-
-          const name =
-            item?.id ||
-            item?.name ||
-            item?.stat ||
-            '';
-
-          const value =
-            item?.value ||
-            item?.amount ||
-            item?.count ||
-            0;
-
-          if (
-            name.toLowerCase().includes('kill') &&
-            !name.toLowerCase().includes('final')
-          ) {
-            kills = num(value);
-          }
-
-          if (
-            name.toLowerCase().includes('win')
-          ) {
-            wins = num(value);
-          }
-
-          if (
-            name.toLowerCase().includes('bed')
-          ) {
-            beds = num(value);
-          }
-
-          if (
-            name.toLowerCase().includes('death')
-          ) {
-            deaths = num(value);
-          }
-
-          if (
-            name.toLowerCase().includes('play')
-          ) {
-            games = num(value);
-          }
-
-          if (
-            name.toLowerCase().includes('final')
-          ) {
-            finals = num(value);
-          }
-        }
-      }
 
       const embed = new EmbedBuilder()
 
@@ -395,43 +332,43 @@ client.on('interactionCreate', async interaction => {
 
           {
             name: '⚔ Kills',
-            value: kills,
+            value: 'Hidden',
             inline: true
           },
 
           {
             name: '🏆 Wins',
-            value: wins,
+            value: 'Hidden',
             inline: true
           },
 
           {
             name: '🛏 Beds',
-            value: beds,
+            value: 'Hidden',
             inline: true
           },
 
           {
             name: '💀 Deaths',
-            value: deaths,
+            value: 'Hidden',
             inline: true
           },
 
           {
             name: '🎮 Games',
-            value: games,
+            value: 'Hidden',
             inline: true
           },
 
           {
             name: '💥 Final Kills',
-            value: finals,
+            value: 'Hidden',
             inline: true
           }
         )
 
         .setFooter({
-          text: 'Jartex Stats Ultra'
+          text: 'Jartex API currently hides leaderboard stats'
         })
 
         .setTimestamp();
@@ -458,7 +395,7 @@ client.on('interactionCreate', async interaction => {
       if (!clan) {
 
         return interaction.editReply(
-          '❌ Clan not found'
+          '❌ Clan not found or API timeout'
         );
       }
 
@@ -505,7 +442,6 @@ client.on('interactionCreate', async interaction => {
             value: num(
               clan.level ||
               clan.tier ||
-              clan.stats?.level ||
               1
             ),
             inline: true
@@ -516,7 +452,6 @@ client.on('interactionCreate', async interaction => {
             value: num(
               clan.exp ||
               clan.xp ||
-              clan.stats?.xp ||
               0
             ),
             inline: true
@@ -541,11 +476,8 @@ client.on('interactionCreate', async interaction => {
 
     if (interaction.commandName === 'clanlb') {
 
-      await interaction.deferReply();
-
-      // TEMP DISABLED
-      return interaction.editReply(
-        '⚠️ Jartex leaderboard API is currently unstable/broken.'
+      await interaction.reply(
+        '⚠️ Jartex leaderboard API is currently broken/unavailable.'
       );
     }
 
@@ -553,20 +485,24 @@ client.on('interactionCreate', async interaction => {
 
     console.log(err);
 
-    if (
-      interaction.deferred ||
-      interaction.replied
-    ) {
+    try {
 
-      return interaction.editReply(
-        '⚠ Internal bot error'
-      );
-    }
+      if (
+        interaction.deferred ||
+        interaction.replied
+      ) {
 
-    return interaction.reply({
-      content: '⚠ Internal bot error',
-      ephemeral: true
-    });
+        return interaction.editReply(
+          '⚠ Internal bot error'
+        );
+      }
+
+      return interaction.reply({
+        content: '⚠ Internal bot error',
+        ephemeral: true
+      });
+
+    } catch {}
   }
 });
 
